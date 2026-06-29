@@ -1,0 +1,57 @@
+name: Agent Architecture Governance
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  audit-blast-radius:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches full history so target base SHA is visible
+
+      - name: Authoritative Agent Diff Audit
+        run: |
+          MAX_DIFF_LINES=300
+          SOFT_LINE_CAP=200
+          HARD_LINE_CAP=350
+
+          # Authoritative targets for true branch merge-base evaluation
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          echo "Evaluating authoritative PR delta between base ($BASE_SHA) and head ($HEAD_SHA)"
+
+          # 1. Total Diff Volume Verification
+          TOTAL_LINES=$(git diff --numstat $BASE_SHA...$HEAD_SHA | awk '{add += $1; subs += $2} END {print add + subs}')
+          if [ -z "$TOTAL_LINES" ]; then TOTAL_LINES=0; fi
+
+          if [ "$TOTAL_LINES" -gt "$MAX_DIFF_LINES" ]; then
+            echo "❌ CI FAILURE: Full PR diff volume ($TOTAL_LINES lines) exceeds structural cap of $MAX_DIFF_LINES lines."
+            echo "Action Required: Partition this scope into distinct, smaller pull requests."
+            exit 1
+          fi
+
+          # 2. Hard Code Isolation & Configuration Lock
+          if git diff --name-only $BASE_SHA...$HEAD_SHA | grep -E '^(src/core/|src/domain/|.*lock.*|Dockerfile|\.github/)'; then
+            echo "❌ CI FAILURE: Unauthorized modification vector caught inside protected architectural layers or platform specs."
+            echo "Changes to core domains, lockfiles, or workflows require explicit human manual check-ins."
+            exit 1
+          fi
+
+          # 3. Micro-Module Compliance Check
+          CHANGED_FILES=$(git diff --name-only $BASE_SHA...$HEAD_SHA | grep -E '\.(ts|js|py|rs|go)$' || true)
+          for FILE in $CHANGED_FILES; do
+            if [ -f "$FILE" ]; then
+              LINE_COUNT=$(wc -l < "$FILE")
+              if [ "$LINE_COUNT" -gt "$HARD_LINE_CAP" ]; then
+                echo "❌ CI FAILURE: Module $FILE has reached $LINE_COUNT lines, shattering the $HARD_LINE_CAP line limit."
+                exit 1
+              fi
+            fi
+          done
+
+          echo "✅ Comprehensive governance boundaries verified. PR approved for human structural sign-off."
