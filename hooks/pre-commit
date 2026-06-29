@@ -1,0 +1,48 @@
+#!/bin/sh
+
+# Allow the human lead architect to bypass this gate explicitly via:
+# ALLOW_CORE_CHANGES=true git commit -m "Architect manual override"
+if [ "$ALLOW_CORE_CHANGES" = "true" ]; then
+    echo "🔓 Lead Architect override detected. Proceeding with commit..."
+    exit 0
+fi
+
+CHANGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|py|rs|go)$')
+MAX_DIFF_LINES=300
+SOFT_LINE_CAP=200
+HARD_LINE_CAP=350
+
+# 1. Total Diff Volume Verification
+TOTAL_LINES_CHANGED=$(git diff --cached --numstat | awk '{add += $1; subs += $2} END {print add + subs}')
+if [ -n "$TOTAL_LINES_CHANGED" ] && [ "$TOTAL_LINES_CHANGED" -gt "$MAX_DIFF_LINES" ]; then
+    echo "❌ COMMIT REJECTED: Total diff size ($TOTAL_LINES_CHANGED lines) exceeds the $MAX_DIFF_LINES layer cap."
+    echo "Instruct the agent to break down the task into smaller, atomic commits."
+    exit 1
+fi
+
+# 2. File-Specific Length Constraints (Soft vs Hard)
+for FILE in $CHANGED_FILES; do
+    if [ -f "$FILE" ]; then
+        LINE_COUNT=$(wc -l < "$FILE")
+
+        if [ "$LINE_COUNT" -gt "$HARD_LINE_CAP" ]; then
+            echo "❌ COMMIT REJECTED: $FILE is $LINE_COUNT lines. Hard limit is $HARD_LINE_CAP lines."
+            echo "The agent has violated modular architecture rules. Decompose this module."
+            exit 1
+        elif [ "$LINE_COUNT" -gt "$SOFT_LINE_CAP" ]; then
+            echo "⚠️ WARNING: $FILE has grown to $LINE_COUNT lines (Soft cap is $SOFT_LINE_CAP)."
+        fi
+    fi
+done
+
+# 3. Authoritative Core Architecture & Build Protection Lock
+if git diff --cached --name-only | grep -E '^(src/core/|src/domain/|.*lock.*|Dockerfile|\.github/)'; then
+    echo "❌ COMMIT REJECTED: Modification detected in a core architectural directory or system build spec."
+    echo "Agents are strictly forbidden from writing to these layers."
+    echo ""
+    echo "💡 Human Override: If this change is intentional, execute:"
+    echo "   ALLOW_CORE_CHANGES=true git commit -m 'your message'"
+    exit 1
+fi
+
+exit 0
