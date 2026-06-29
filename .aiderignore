@@ -1,0 +1,14 @@
+# Block core layers from write/modification vectors
+src/core/
+src/domain/
+
+# System configuration protection
+package.json
+package-lock.json
+pnpm-lock.yaml
+poetry.lock
+Cargo.toml
+Cargo.lock
+requirements.txt
+Dockerfile
+.github/workflows/
