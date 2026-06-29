@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm *)",
+      "Bash(git push *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(apt *)",
+      "Bash(pip install *)",
+      "Bash(npm install *)"
+    ],
+    "allow": [
+      "Bash(npm test)",
+      "Bash(pytest)",
+      "Bash(cargo test)",
+      "Bash(git status)",
+      "Bash(git diff *)"
+    ]
+  },
+  "permissions.disableBypassPermissionsMode": "disable",
+  "permissions.disableAutoMode": "disable"
+}
