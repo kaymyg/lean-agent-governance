@@ -1,0 +1,14 @@
+rules:
+  - id: autonomous-agent-shell-injection
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(..., shell=True)
+          - pattern: os.system(...)
+          - pattern: exec(...)
+          - pattern: eval(...)
+    message: "Critical AST Violation: High-risk dynamic shell execution sequence detected."
+    severity: ERROR
+    languages: [python, javascript, typescript, go]
+    metadata:
+      base_risk: 90
+      confidence: 0.95

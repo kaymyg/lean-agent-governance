@@ -1,0 +1,34 @@
+{
+  "system_settings": {
+    "historical_decay_half_life_days": 3.0,
+    "trusted_registries": [
+      "https://registry.npmjs.org/",
+      "https://files.pythonhosted.org/",
+      "https://crates.io/"
+    ]
+  },
+  "context_profiles": {
+    "default": {
+      "weights": {
+        "prompt": 0.15,
+        "behavior": 0.20,
+        "diff": 0.25,
+        "secret": 0.20,
+        "dependency": 0.10,
+        "historical": 0.10
+      },
+      "thresholds": { "warn": 35, "quarantine": 65, "terminate_quarantine_branch": 85 }
+    },
+    "security_sensitive": {
+      "weights": {
+        "prompt": 0.10,
+        "behavior": 0.15,
+        "diff": 0.35,
+        "secret": 0.20,
+        "dependency": 0.10,
+        "historical": 0.10
+      },
+      "thresholds": { "warn": 25, "quarantine": 50, "terminate_quarantine_branch": 75 }
+    }
+  }
+}
