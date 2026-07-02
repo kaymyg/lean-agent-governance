@@ -5,52 +5,61 @@ tags:
   - ai-governance
   - sandboxing
   - devsecops
-pretty_name: Adaptive Runtime Security Platform for Autonomous Agents (v7.2)
+pretty_name: Adaptive Runtime Security Platform for Autonomous Agents (v8.0)
 ---
 
-# Adaptive Runtime Security Platform for Autonomous Agents (v7.2)
+# Adaptive Runtime Security Platform for Autonomous Agents (v8.0)
 
 A production-ready, drop-in governance layer for AI coding agents (Claude Code, Cursor, Aider).
-v7.2 closes out the 4 major + 3 minor issues found in the v7.1 external review.
 
-## Changelog: v7.1 → v7.2
+It combines sandbox isolation, runtime telemetry, and weighted risk scoring to **contain**
+prompt injection and malicious agent behavior before changes reach the host repository.
+This is a defense-in-depth control, not a guarantee against all prompt injection — see
+"Scope & Limitations" below.
+
+## Changelog: v7.2 → v8.0
 
 | # | Issue | Severity | Fix |
 | --- | --- | --- | --- |
-| 1 | Session UUID collision (`date +%s` granularity) | High | Switched to `uuid.uuid4()` for guaranteed-unique session IDs |
-| 2 | Historical velocity always returned 0 (queried by unique `session_id`) | **Critical** | Track a stable `repo_id` (derived from git remote) and query history by repo, not session |
-| 3 | Pre-score stored in fragile `/tmp/pre_score_*.txt` files | Medium-High | Moved to a `session_state` SQLite table (WAL mode), no stale files or partial writes |
-| 4 | Container had RW access to the real repo + `.git` | High | Repo now mounts **read-only**; agent works in a tmpfs copy; only a scoped patch file crosses back to the host, applied only after JRI evaluation |
-| 5 | Semgrep spawned one process per changed file | Minor | Batched into a single `semgrep ... file1 file2 file3 --json` invocation |
-| 6 | CI only passed changed filenames into the prompt scorer | Minor | CI now passes actual patch content (truncated) for real prompt-injection scoring |
-| 7 | `refactor_heavy` profile branch was unreachable dead code | Minor | Added a `refactor_heavy` profile to config + prompt-intent detection so the branch is now reachable |
+| 1 | `cp -r` into tmpfs was slow/memory-heavy on monorepos (node_modules, build artifacts) | Medium | Sandbox now copies only git-tracked files via `git archive \| tar -x`, skipping ignored directories entirely |
+| 2 | No cap on patch size before the host tried to `git apply` it | High | Patch size checked against `max_patch_size_bytes` (default 5MB) *before* any apply attempt; oversized patches are rejected outright |
+| 3 | Prompt-injection regex could be bypassed by zero-width characters, bidi overrides, or whitespace fragmentation | Medium (partial mitigation) | Strip zero-width/bidi-override characters and collapse whitespace before pattern matching; messaging updated to accurately describe this as heuristic detection, not semantic analysis |
+| 4 | No timeout — a hung agent process could hold the sandbox open indefinitely | High | `timeout` wraps the full container run, killed and treated as a failed session if it exceeds `agent_runtime_timeout_seconds` (default 900s) |
+| 5 | `session_history` / `session_state` grew unbounded | Low-Medium | Auto-prune on every engine init, controlled by `history_retention_days` (default 30) |
+| 6 | If a patch failed to apply on the host, container-side activity was scored as zero — evidence lost | Medium (partial mitigation) | Orchestrator exports a small telemetry file (modified file count, apply-failure flag) that the engine folds into behavioral scoring even when the patch itself is rejected |
+
+## Scope & Limitations
+
+Be precise about what this does and doesn't do:
+
+- **Does**: sandbox agent execution (network-isolated, read-only host repo, resource-capped, timeout-enforced), detect common prompt-injection payloads and override signatures, cap the blast radius of any single agent session, and score risk across multiple independent signals before anything lands in the real repo.
+- **Does not**: perform semantic/LLM-based prompt analysis. Regex + normalization catches known attack patterns (override phrases, base64-encoded payloads, zero-width smuggling) but a sufficiently novel injection technique can still get through the pre-runtime gate. Treat the runtime sandbox and post-runtime scoring as your primary defenses, and pre-runtime prompt scanning as an early tripwire, not a guarantee.
 
 ## What's Included
 
 | File | Purpose |
 | --- | --- |
 | `core_engine.py` | Risk Fusion, Normalization & Policy Engine (JRI calculation) |
-| `config/security_profiles.json` | Context-aware weight profiles: `default`, `security_sensitive`, `refactor_heavy` |
+| `config/security_profiles.json` | Context-aware weight profiles + system tunables (patch size cap, runtime timeout, retention) |
 | `config/rules.semgrep.yml` | AST-aware semantic diff rules |
-| `scripts/secure-agent-orchestrator.sh` | Phase-driven execution wrapper — RO repo mount / RW tmpfs overlay / patch export |
+| `scripts/secure-agent-orchestrator.sh` | Phase-driven execution wrapper — RO repo mount / RW tmpfs overlay / patch export / timeout enforcement |
 | `.github/workflows/agent-governance.yml` | Remote CI pipeline arbiter |
 
-## Isolation Model (v7.2)
+## Isolation Model
 
 ```
-Host repo (read-only mount) ──► Container tmpfs copy (agent works here)
+Host repo (read-only mount) ──► Container tmpfs copy (git-tracked files only)
+                                        │
+                                timeout-bounded agent run
                                         │
                                         ▼
-                              git diff → /patches/session.patch
+                      git diff --cached → /patches/session.patch
+                      + modified_files.txt + telemetry.json
                                         │
                     (only this narrow RW mount crosses back)
                                         ▼
-                Host: git apply --check → git apply → JRI evaluation
+        Host: patch size check → git apply --check → git apply → JRI evaluation
 ```
-
-The agent can never touch host git refs, history, or objects directly — it only ever
-produces a patch, and that patch is applied on the host **after** the container is
-already destroyed, then scored before it's allowed to land.
 
 ## Quick Setup
 
@@ -58,6 +67,14 @@ already destroyed, then scored before it's allowed to land.
 chmod +x scripts/secure-agent-orchestrator.sh
 ./scripts/secure-agent-orchestrator.sh aider "your prompt here"
 ```
+
+## System Tunables (`config/security_profiles.json`)
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `max_patch_size_bytes` | 5242880 (5MB) | Reject oversized patches before host `git apply` ever sees them |
+| `agent_runtime_timeout_seconds` | 900 | Kill hung containers instead of letting them run indefinitely |
+| `history_retention_days` | 30 | Prune old `session_history` / `session_state` rows automatically |
 
 ## Risk Thresholds
 

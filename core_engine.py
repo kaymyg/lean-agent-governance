@@ -9,7 +9,19 @@ import base64
 import subprocess
 import uuid
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
+
+# Characters commonly used to smuggle instructions past naive regex matching:
+# zero-width joiners/spaces and directional override marks. Stripped before
+# pattern matching so "ignore\u200bprevious" still triggers the same signature
+# as "ignoreprevious". This is still a heuristic layer, not semantic analysis —
+# see README for accurate scope-of-defense language.
+_ZERO_WIDTH_CHARS = "".join([
+    "\u200b", "\u200c", "\u200d", "\u2060", "\ufeff",
+    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+])
+_ZERO_WIDTH_RE = re.compile("[" + _ZERO_WIDTH_CHARS + "]")
+
 
 class AgentSecurityEngine:
     def __init__(self, workspace_dir, session_id, raw_prompt=""):
@@ -19,15 +31,12 @@ class AgentSecurityEngine:
         self.db_path = "/tmp/agent_intel_state.db"
         self.explain_log = []
 
-        # FIX #2 (Critical): historical velocity must be tracked per-repo, not per-session.
-        # A session_id is unique per run by design, so filtering history on it always
-        # returned zero prior rows. Derive a stable repo_id from the git remote (falling
-        # back to the absolute workspace path) so history persists across sessions.
         self.repo_id = self._derive_repo_id()
 
         self._init_database()
         self.config = self._load_config()
         self.profile = self._determine_context_profile()
+        self._prune_history()
 
     def _derive_repo_id(self):
         try:
@@ -40,8 +49,6 @@ class AgentSecurityEngine:
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
     def _init_database(self):
-        """WAL mode for concurrent access, plus a session_state table replacing the
-        fragile /tmp/pre_score_{session}.txt file (FIX #3)."""
         with sqlite3.connect(self.db_path, timeout=30.0) as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("""
@@ -66,14 +73,25 @@ class AgentSecurityEngine:
         with open(config_path, "r") as f:
             return json.load(f)
 
+    def _prune_history(self):
+        """FIX #5 (Low-Medium): unbounded growth in session_history/session_state
+        slows historical scans over months of use. Prune anything older than the
+        configured retention window on every engine init."""
+        retention_days = self.config.get("system_settings", {}).get("history_retention_days", 30)
+        cutoff = datetime.utcnow() - timedelta(days=retention_days)
+        try:
+            with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+                conn.execute("DELETE FROM session_history WHERE timestamp < ?", (cutoff,))
+                conn.execute("DELETE FROM session_state WHERE created_at < ?", (cutoff,))
+        except Exception:
+            pass
+
     def _determine_context_profile(self):
         sensitive_patterns = r"(auth|login|jwt|rbac|oauth|session|crypto|credential|privilege|permission|token)"
         refactor_patterns = r"(refactor|restructure|rename across|migrate|reorganize|large-scale rewrite)"
 
         if re.search(sensitive_patterns, self.raw_prompt, re.IGNORECASE):
             return "security_sensitive"
-        # Makes the previously-dead "refactor_heavy" branch in evaluate_behavioral_risk
-        # reachable via prompt intent detection, instead of being unreachable dead logic.
         if re.search(refactor_patterns, self.raw_prompt, re.IGNORECASE) and "refactor_heavy" in self.config.get("context_profiles", {}):
             return "refactor_heavy"
         return "default"
@@ -85,24 +103,33 @@ class AgentSecurityEngine:
         if not self.raw_prompt:
             return 0
 
-        norm = unicodedata.normalize("NFKC", self.raw_prompt).lower()
+        # FIX #3 (Medium, partial mitigation): strip zero-width/bidi-override
+        # characters and apply NFKC normalization *before* stripping markdown/
+        # comments, so homoglyph/invisible-character smuggling doesn't slip
+        # override signatures past the regex. This still does not amount to
+        # semantic prompt analysis — see README for accurate framing.
+        norm = _ZERO_WIDTH_RE.sub("", self.raw_prompt)
+        norm = unicodedata.normalize("NFKC", norm).lower()
         norm = re.sub(r"<!--.*?-->", "", norm, flags=re.DOTALL)
         norm = re.sub(r"```.*?```", "", norm, flags=re.DOTALL)
+        # Collapse repeated whitespace/newlines, another common fragmentation trick
+        # (e.g. "ignore\n\nprevious" split across lines to dodge a single-line regex).
+        norm_collapsed = re.sub(r"\s+", " ", norm)
 
         b64_patterns = r"[a-zA-Z0-9+/]{40,}={0,2}"
         for match in re.findall(b64_patterns, norm):
             try:
                 decoded = base64.b64decode(match).decode("utf-8", errors="ignore").lower()
-                norm += " " + decoded
+                norm_collapsed += " " + re.sub(r"\s+", " ", decoded)
             except Exception:
                 pass
 
         score = 0
-        if re.search(r"(ignore previous|system override|bypass restrictions|developer mode)", norm):
+        if re.search(r"(ignore\s*previous|system\s*override|bypass\s*restrictions|developer\s*mode)", norm_collapsed):
             base_risk = 85; confidence = 0.95
             score += (base_risk * confidence)
             self.explain_log.append(f"Prompt Normalizer: Override signature detected (Contribution: +{int(base_risk * confidence)})")
-        if re.search(r"(reveal secrets|system prompt|read \.env)", norm):
+        if re.search(r"(reveal\s*secrets|system\s*prompt|read\s*\.env)", norm_collapsed):
             base_risk = 60; confidence = 0.90
             score += (base_risk * confidence)
             self.explain_log.append(f"Prompt Normalizer: Target vector probe signature detected (Contribution: +{int(base_risk * confidence)})")
@@ -116,8 +143,6 @@ class AgentSecurityEngine:
         return final_score
 
     def save_pre_score(self, score):
-        """FIX #3: persist pre-runtime score in SQLite instead of a /tmp text file,
-        which was prone to stale leftovers, partial writes, and no cleanup path."""
         with sqlite3.connect(self.db_path, timeout=30.0) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO session_state VALUES (?, ?, ?, ?)",
@@ -162,7 +187,21 @@ class AgentSecurityEngine:
             diff_stats = subprocess.check_output(["git", "diff", "--cached", "--numstat"], text=True).splitlines()
             lines_changed = sum(sum(int(x) for x in line.split()[:2] if x.isdigit()) for line in diff_stats)
         except Exception:
-            return 0
+            files_changed, lines_changed = 0, 0
+
+        # FIX #6 (Medium, partial mitigation): if the patch failed to apply on the
+        # host, the diff above is empty and this signal would silently go to zero
+        # even if the agent did something risky inside the container. Fold in
+        # container-side telemetry (modified file count) exported by the
+        # orchestrator alongside the patch, so a failed-apply doesn't erase evidence.
+        telemetry = self._load_container_telemetry()
+        if telemetry:
+            files_changed = max(files_changed, telemetry.get("modified_file_count", 0))
+            if telemetry.get("patch_apply_failed"):
+                self.explain_log.append(
+                    "Telemetry Bridge: Container-side patch failed to apply on host — "
+                    f"scoring against {telemetry.get('modified_file_count', 0)} modified files reported by container instead"
+                )
 
         max_files = 12 if self.profile == "refactor_heavy" else 3
         max_lines = 700 if self.profile == "refactor_heavy" else 150
@@ -177,9 +216,17 @@ class AgentSecurityEngine:
 
         return min(score, 100)
 
+    def _load_container_telemetry(self):
+        telemetry_path = os.environ.get("AGENT_TELEMETRY_PATH")
+        if not telemetry_path or not os.path.exists(telemetry_path):
+            return None
+        try:
+            with open(telemetry_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
     def evaluate_historical_velocity(self):
-        """FIX #2 (Critical): now queries by repo_id so history actually accumulates
-        across sessions instead of always looking up a session_id with zero prior rows."""
         half_life = self.config["system_settings"]["historical_decay_half_life_days"]
         with sqlite3.connect(self.db_path, timeout=30.0) as conn:
             cursor = conn.cursor()
@@ -213,8 +260,6 @@ class AgentSecurityEngine:
         return True
 
     def run_semgrep_ast_diff(self):
-        """FIX #5 (Minor): batch all target files into a single semgrep invocation
-        instead of spawning one process per file, which doesn't scale on monorepos."""
         try:
             changed_files = subprocess.check_output(["git", "diff", "--cached", "--name-only"], text=True).splitlines()
             target_modules = [f for f in changed_files if re.search(r"\.(ts|js|py|rs|go)$", f) and os.path.exists(f)]
@@ -237,7 +282,6 @@ class AgentSecurityEngine:
         return 0
 
     def compute_and_route_jri(self):
-        """Executes full mathematical matrix normalization across all signals."""
         pre_runtime_prompt_score = self.load_pre_score()
         b_score = self.evaluate_behavioral_risk()
         s_score = 100 if not self.verify_clean_secrets() else 0

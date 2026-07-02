@@ -1,6 +1,9 @@
 {
   "system_settings": {
     "historical_decay_half_life_days": 3.0,
+    "history_retention_days": 30,
+    "max_patch_size_bytes": 5242880,
+    "agent_runtime_timeout_seconds": 900,
     "trusted_registries": [
       "https://registry.npmjs.org/",
       "https://files.pythonhosted.org/",
