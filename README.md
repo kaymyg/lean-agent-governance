@@ -5,70 +5,67 @@ tags:
   - ai-governance
   - sandboxing
   - devsecops
-pretty_name: Adaptive Runtime Security Platform for Autonomous Agents (v7.1)
+pretty_name: Adaptive Runtime Security Platform for Autonomous Agents (v7.2)
 ---
 
-# Adaptive Runtime Security Platform for Autonomous Agents (v7.1 Release Candidate)
+# Adaptive Runtime Security Platform for Autonomous Agents (v7.2)
 
 A production-ready, drop-in governance layer for AI coding agents (Claude Code, Cursor, Aider).
-This is the v7.1 upgrade to the Ultra-Lean Agent Governance Framework (v4) — replacing the static
-binary-decision checks in v4 with a weighted, multi-signal **Judgement Risk Index (JRI)** engine.
+v7.2 closes out the 4 major + 3 minor issues found in the v7.1 external review.
 
-Copy the files into any repository to establish sandbox enforcement, boundary rules, weighted risk
-scoring, and CI pipeline checkpoints.
+## Changelog: v7.1 → v7.2
 
-## What's New in v7.1 (vs v4)
-
-| v4 | v7.1 |
-| --- | --- |
-| Static allow/deny rules per file | Weighted risk fusion across 6 signal types (prompt, behavior, diff, secret, dependency, historical) |
-| Single global policy | Context-aware profiles (`default`, `security_sensitive`) with different weights/thresholds |
-| Pre-commit hook only | Split-phase lifecycle: Phase A (pre-runtime prompt scan) → Phase B (sandboxed execution) → Phase C (post-runtime scoring) |
-| No memory across sessions | SQLite WAL-mode historical velocity tracking with exponential decay |
-| Pattern-matching diff checks | AST-aware Semgrep rules for structural violations (shell injection, `eval`, `exec`) |
-| Manual quarantine | Automatic quarantine branch isolation with salted branch names |
+| # | Issue | Severity | Fix |
+| --- | --- | --- | --- |
+| 1 | Session UUID collision (`date +%s` granularity) | High | Switched to `uuid.uuid4()` for guaranteed-unique session IDs |
+| 2 | Historical velocity always returned 0 (queried by unique `session_id`) | **Critical** | Track a stable `repo_id` (derived from git remote) and query history by repo, not session |
+| 3 | Pre-score stored in fragile `/tmp/pre_score_*.txt` files | Medium-High | Moved to a `session_state` SQLite table (WAL mode), no stale files or partial writes |
+| 4 | Container had RW access to the real repo + `.git` | High | Repo now mounts **read-only**; agent works in a tmpfs copy; only a scoped patch file crosses back to the host, applied only after JRI evaluation |
+| 5 | Semgrep spawned one process per changed file | Minor | Batched into a single `semgrep ... file1 file2 file3 --json` invocation |
+| 6 | CI only passed changed filenames into the prompt scorer | Minor | CI now passes actual patch content (truncated) for real prompt-injection scoring |
+| 7 | `refactor_heavy` profile branch was unreachable dead code | Minor | Added a `refactor_heavy` profile to config + prompt-intent detection so the branch is now reachable |
 
 ## What's Included
 
 | File | Purpose |
 | --- | --- |
-| `core_engine.py` | The Risk Fusion, Normalization & Policy Engine (JRI calculation) |
-| `config/security_profiles.json` | System configuration & context-aware weight profiles |
-| `config/rules.semgrep.yml` | Layer 3: AST-aware semantic diff rules |
-| `scripts/secure-agent-orchestrator.sh` | Phase-driven execution wrapper (Docker sandbox) |
-| `.github/workflows/agent-governance.yml` | Over-the-wire remote CI pipeline arbiter |
+| `core_engine.py` | Risk Fusion, Normalization & Policy Engine (JRI calculation) |
+| `config/security_profiles.json` | Context-aware weight profiles: `default`, `security_sensitive`, `refactor_heavy` |
+| `config/rules.semgrep.yml` | AST-aware semantic diff rules |
+| `scripts/secure-agent-orchestrator.sh` | Phase-driven execution wrapper — RO repo mount / RW tmpfs overlay / patch export |
+| `.github/workflows/agent-governance.yml` | Remote CI pipeline arbiter |
 
-## Defense Layers
+## Isolation Model (v7.2)
 
-| Layer | Mechanism | What It Stops |
-| --- | --- | --- |
-| Pre-Runtime Gateway | `core_engine.py::pre_runtime_scan` | Prompt injection, override signatures, obfuscated (base64) payloads |
-| Execution Guard | `--network none`, `--cap-drop ALL`, `--read-only` Docker sandbox | Fork bombs, data exfiltration, subshell escapes |
-| Secret Guard | Trufflehog scan + null bind mount on `.env` | Credential/secret leakage into model context |
-| Diff/AST Guard | Semgrep structural rules | Shell injection, `eval`/`exec`, backdoors disguised as refactors |
-| Historical Memory | SQLite WAL + exponential decay | Slow-creep attacks spread across multiple commits |
-| Policy Routing | Weighted JRI + quarantine branches | False-positive-safe isolation of flagged changes |
+```
+Host repo (read-only mount) ──► Container tmpfs copy (agent works here)
+                                        │
+                                        ▼
+                              git diff → /patches/session.patch
+                                        │
+                    (only this narrow RW mount crosses back)
+                                        ▼
+                Host: git apply --check → git apply → JRI evaluation
+```
+
+The agent can never touch host git refs, history, or objects directly — it only ever
+produces a patch, and that patch is applied on the host **after** the container is
+already destroyed, then scored before it's allowed to land.
 
 ## Quick Setup
 
 ```bash
-# 1. Copy all files into your repo root
-# 2. Make scripts executable
 chmod +x scripts/secure-agent-orchestrator.sh
-
-# 3. Run an agent session inside the sandbox
 ./scripts/secure-agent-orchestrator.sh aider "your prompt here"
 ```
 
-## Risk Thresholds (default profile)
+## Risk Thresholds
 
-- **JRI ≤ 35** → Allow
-- **35 < JRI ≤ 65** → Warn (human override required)
-- **65 < JRI ≤ 85** → Quarantine (auto-stash)
-- **JRI > 85** → Block & isolate to `quarantine/session_<id>_<salt>` branch
-
-`security_sensitive` profile (triggered by auth/crypto/token keywords in the prompt) uses tighter
-thresholds (25 / 50 / 75).
+| Profile | Warn | Quarantine | Block & Isolate |
+| --- | --- | --- | --- |
+| `default` | 35 | 65 | 85 |
+| `security_sensitive` | 25 | 50 | 75 |
+| `refactor_heavy` | 45 | 75 | 90 |
 
 ## Human Override
 

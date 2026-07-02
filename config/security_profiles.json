@@ -29,6 +29,17 @@
         "historical": 0.10
       },
       "thresholds": { "warn": 25, "quarantine": 50, "terminate_quarantine_branch": 75 }
+    },
+    "refactor_heavy": {
+      "weights": {
+        "prompt": 0.10,
+        "behavior": 0.10,
+        "diff": 0.30,
+        "secret": 0.20,
+        "dependency": 0.15,
+        "historical": 0.15
+      },
+      "thresholds": { "warn": 45, "quarantine": 75, "terminate_quarantine_branch": 90 }
     }
   }
 }
