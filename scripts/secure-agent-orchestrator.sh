@@ -90,13 +90,15 @@ fi
 # Export a small telemetry file the engine can read to score against what the
 # container reported, instead of silently defaulting every signal to zero.
 TELEMETRY_PATH="$PATCH_DIR/telemetry.json"
-python3 -c "
-import json
-json.dump({
-    'modified_file_count': ${MODIFIED_FILE_COUNT},
-    'patch_apply_failed': ${PATCH_APPLY_FAILED,,}
-}, open('${TELEMETRY_PATH}', 'w'))
-"
+# FIX (HIGH): bash's lowercase `false`/`true` are not valid Python literals.
+# Interpolating them into generated Python source raised
+#   NameError: name 'false' is not defined
+# and because this script runs under `set -euo pipefail`, that aborted the run
+# BEFORE `core_engine.py post` was ever reached -- meaning the entire
+# post-runtime risk-scoring phase silently never executed on the normal path.
+# Emit the JSON directly from the shell; no Python source generation needed.
+printf '{"modified_file_count": %d, "patch_apply_failed": %s}\n' \
+  "${MODIFIED_FILE_COUNT}" "${PATCH_APPLY_FAILED}" > "${TELEMETRY_PATH}"
 export AGENT_TELEMETRY_PATH="$TELEMETRY_PATH"
 
 python3 core_engine.py "post" "$SESSION_UUID" "$USER_PROMPT"

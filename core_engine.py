@@ -11,16 +11,18 @@ import uuid
 import hashlib
 from datetime import datetime, timedelta
 
-# Characters commonly used to smuggle instructions past naive regex matching:
-# zero-width joiners/spaces and directional override marks. Stripped before
-# pattern matching so "ignore\u200bprevious" still triggers the same signature
-# as "ignoreprevious". This is still a heuristic layer, not semantic analysis —
-# see README for accurate scope-of-defense language.
 _ZERO_WIDTH_CHARS = "".join([
-    "\u200b", "\u200c", "\u200d", "\u2060", "\ufeff",
-    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+    "​", "‌", "‍", "⁠", "﻿",
+    "‪", "‫", "‬", "‭", "‮",
 ])
 _ZERO_WIDTH_RE = re.compile("[" + _ZERO_WIDTH_CHARS + "]")
+
+# Process exit statuses must be 0-255; anything larger is taken mod 256.
+# The original code used sys.exit(403), which the OS reported as 147.
+EXIT_ALLOW = 0
+EXIT_BLOCK_ISOLATE = 1
+EXIT_QUARANTINE = 2
+EXIT_PRE_RUNTIME_BLOCK = 3
 
 
 class AgentSecurityEngine:
@@ -74,9 +76,6 @@ class AgentSecurityEngine:
             return json.load(f)
 
     def _prune_history(self):
-        """FIX #5 (Low-Medium): unbounded growth in session_history/session_state
-        slows historical scans over months of use. Prune anything older than the
-        configured retention window on every engine init."""
         retention_days = self.config.get("system_settings", {}).get("history_retention_days", 30)
         cutoff = datetime.utcnow() - timedelta(days=retention_days)
         try:
@@ -96,33 +95,38 @@ class AgentSecurityEngine:
             return "refactor_heavy"
         return "default"
 
-    # ==========================================================================
-    # PHASE A: PRE-RUNTIME GATEWAY SCANNER
-    # ==========================================================================
     def pre_runtime_scan(self):
         if not self.raw_prompt:
             return 0
 
-        # FIX #3 (Medium, partial mitigation): strip zero-width/bidi-override
-        # characters and apply NFKC normalization *before* stripping markdown/
-        # comments, so homoglyph/invisible-character smuggling doesn't slip
-        # override signatures past the regex. This still does not amount to
-        # semantic prompt analysis — see README for accurate framing.
-        norm = _ZERO_WIDTH_RE.sub("", self.raw_prompt)
-        norm = unicodedata.normalize("NFKC", norm).lower()
-        norm = re.sub(r"<!--.*?-->", "", norm, flags=re.DOTALL)
-        norm = re.sub(r"```.*?```", "", norm, flags=re.DOTALL)
-        # Collapse repeated whitespace/newlines, another common fragmentation trick
-        # (e.g. "ignore\n\nprevious" split across lines to dodge a single-line regex).
+        # FIX (HIGH): base64 is CASE-SENSITIVE. The previous implementation
+        # lowercased the prompt and then tried to decode candidates out of the
+        # lowercased text, so every encoded payload decoded to garbage and
+        # scored 0. A base64 "ignore previous instructions and bypass
+        # restrictions" passed cleanly while the plaintext scored 100.
+        # Candidates are now extracted from the ORIGINAL-CASE string; only the
+        # decoded result is lowercased for matching.
+        case_preserved = _ZERO_WIDTH_RE.sub("", self.raw_prompt)
+        case_preserved = unicodedata.normalize("NFKC", case_preserved)
+        case_preserved = re.sub(r"<!--.*?-->", "", case_preserved, flags=re.DOTALL)
+        case_preserved = re.sub(r"```.*?```", "", case_preserved, flags=re.DOTALL)
+
+        norm = case_preserved.lower()
         norm_collapsed = re.sub(r"\s+", " ", norm)
 
-        b64_patterns = r"[a-zA-Z0-9+/]{40,}={0,2}"
-        for match in re.findall(b64_patterns, norm):
+        b64_patterns = r"[A-Za-z0-9+/]{16,}={0,2}"
+        for match in re.findall(b64_patterns, case_preserved):
+            # Base64 needs length % 4 == 0; pad rather than discard so payloads
+            # embedded mid-sentence still decode.
+            candidate = match + "=" * (-len(match) % 4)
             try:
-                decoded = base64.b64decode(match).decode("utf-8", errors="ignore").lower()
-                norm_collapsed += " " + re.sub(r"\s+", " ", decoded)
+                decoded = base64.b64decode(candidate, validate=False).decode(
+                    "utf-8", errors="ignore"
+                ).lower()
             except Exception:
-                pass
+                continue
+            if decoded.strip():
+                norm_collapsed += " " + re.sub(r"\s+", " ", decoded)
 
         score = 0
         if re.search(r"(ignore\s*previous|system\s*override|bypass\s*restrictions|developer\s*mode)", norm_collapsed):
@@ -138,8 +142,12 @@ class AgentSecurityEngine:
 
         thresholds = self.config["context_profiles"][self.profile]["thresholds"]
         if final_score >= thresholds["terminate_quarantine_branch"]:
-            print(f"❌ PRE-RUNTIME ENFORCEMENT BLOCK: Prompt payload hazard score [{int(final_score)}] violates policy.")
-            sys.exit(403)
+            print(f"PRE-RUNTIME ENFORCEMENT BLOCK: Prompt payload hazard score [{int(final_score)}] violates policy.")
+            # FIX: sys.exit(403) was silently truncated to 147 by the OS
+            # (process exit statuses are mod 256), so callers checking for 403
+            # never matched and the code was effectively undiagnosable.
+            # Use a documented in-range code instead.
+            sys.exit(EXIT_PRE_RUNTIME_BLOCK)
         return final_score
 
     def save_pre_score(self, score):
@@ -157,6 +165,7 @@ class AgentSecurityEngine:
             )
             row = cursor.fetchone()
         return row[0] if row else 0
+
 
     # ==========================================================================
     # PHASE C: POST-RUNTIME METRIC COMPILATION ENGINES
@@ -189,11 +198,6 @@ class AgentSecurityEngine:
         except Exception:
             files_changed, lines_changed = 0, 0
 
-        # FIX #6 (Medium, partial mitigation): if the patch failed to apply on the
-        # host, the diff above is empty and this signal would silently go to zero
-        # even if the agent did something risky inside the container. Fold in
-        # container-side telemetry (modified file count) exported by the
-        # orchestrator alongside the patch, so a failed-apply doesn't erase evidence.
         telemetry = self._load_container_telemetry()
         if telemetry:
             files_changed = max(files_changed, telemetry.get("modified_file_count", 0))
@@ -253,7 +257,16 @@ class AgentSecurityEngine:
         return min(score, 100)
 
     def verify_clean_secrets(self):
-        res = subprocess.run(["trufflehog", "filesystem", "--fail", ".", "--exclude-paths=.aiderignore"], capture_output=True)
+        """NOTE: fails CLOSED. If trufflehog is missing, returncode != 0 and this
+        correctly reports 'not clean' rather than silently scoring 0."""
+        try:
+            res = subprocess.run(
+                ["trufflehog", "filesystem", "--fail", ".", "--exclude-paths=.aiderignore"],
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            self.explain_log.append("Secret Guard: trufflehog NOT INSTALLED — failing closed (+100)")
+            return False
         if res.returncode != 0:
             self.explain_log.append("Secret Guard: Active high-entropy match credential leak detected (+100)")
             return False
@@ -266,19 +279,28 @@ class AgentSecurityEngine:
 
             if not target_modules:
                 return 0
+        except Exception:
+            return 0
 
+        # A missing/failing scanner must not silently score 0 on a security
+        # control. Distinguish "scanner unavailable" from "scan found nothing".
+        try:
             res = json.loads(subprocess.check_output(
                 ["semgrep", "--config=config/rules.semgrep.yml", "--json", *target_modules], text=True
             ))
-            violations = len(res.get("results", []))
+        except FileNotFoundError:
+            self.explain_log.append("Semgrep AST Analyzer: semgrep NOT INSTALLED — treating as unscanned (+50)")
+            return 50
+        except Exception as e:
+            self.explain_log.append(f"Semgrep AST Analyzer: scan failed ({type(e).__name__}) — treating as unscanned (+50)")
+            return 50
 
-            if violations > 0:
-                base_risk = 90; confidence = 0.95
-                weighted_contribution = int(base_risk * confidence * violations)
-                self.explain_log.append(f"Semgrep AST Analyzer: {violations} structural security rules violated (Contribution: +{min(weighted_contribution, 100)})")
-                return min(weighted_contribution, 100)
-        except Exception:
-            pass
+        violations = len(res.get("results", []))
+        if violations > 0:
+            base_risk = 90; confidence = 0.95
+            weighted_contribution = int(base_risk * confidence * violations)
+            self.explain_log.append(f"Semgrep AST Analyzer: {violations} structural security rules violated (Contribution: +{min(weighted_contribution, 100)})")
+            return min(weighted_contribution, 100)
         return 0
 
     def compute_and_route_jri(self):
@@ -311,7 +333,7 @@ class AgentSecurityEngine:
         thresholds = self.config["context_profiles"][self.profile]["thresholds"]
 
         print("\n" + "="*60)
-        print(f"🛡️  AUTONOMOUS AGENT RUNTIME RISK ANALYSIS REPORT (JRI: {final_jri}/100)")
+        print(f"AUTONOMOUS AGENT RUNTIME RISK ANALYSIS REPORT (JRI: {final_jri}/100)")
         print(f"    Profile Context: {self.profile} | Session: {self.session_id} | Repo: {self.repo_id}")
         print("="*60)
         for entry in self.explain_log:
@@ -319,25 +341,26 @@ class AgentSecurityEngine:
         print("="*60)
 
         if final_jri <= thresholds["warn"]:
-            print("✅ [POLICY: ALLOW] Workspace metrics normalized. Changes passed forward.")
-            sys.exit(0)
+            print("[POLICY: ALLOW] Workspace metrics normalized. Changes passed forward.")
+            sys.exit(EXIT_ALLOW)
         elif final_jri <= thresholds["quarantine"]:
-            print("⚠️ [POLICY: WARN] Structural delta divergence flagged. Human gatekeeper override signature forced.")
-            sys.exit(0)
+            print("[POLICY: WARN] Structural delta divergence flagged. Human gatekeeper override signature forced.")
+            sys.exit(EXIT_ALLOW)
         elif final_jri <= thresholds["terminate_quarantine_branch"]:
-            print("🚫 [POLICY: QUARANTINE] Agent deviation metrics flagged. Stashing local adjustments...")
+            print("[POLICY: QUARANTINE] Agent deviation metrics flagged. Stashing local adjustments...")
             subprocess.run(["git", "stash", "save", f"quarantine_{self.session_id}"])
-            sys.exit(2)
+            sys.exit(EXIT_QUARANTINE)
         else:
             salt = str(uuid.uuid4())[:4]
             q_branch = f"quarantine/session_{self.session_id}_{salt}"
-            print(f"❌ [POLICY: BLOCK & ISOLATE] Threat signatures confirmed.")
+            print("[POLICY: BLOCK & ISOLATE] Threat signatures confirmed.")
             print(f"    Action: Diverting local modifications into transaction quarantine branch: {q_branch}")
             subprocess.run(["git", "checkout", "-b", q_branch])
             subprocess.run(["git", "add", "."])
             subprocess.run(["git", "commit", "-m", "CRITICAL - Security Platform Intercepted Agent Exploit Pipeline", "--no-verify"])
             subprocess.run(["git", "checkout", "-"])
-            sys.exit(1)
+            sys.exit(EXIT_BLOCK_ISOLATE)
+
 
 if __name__ == "__main__":
     mode = sys.argv[1]
@@ -349,5 +372,8 @@ if __name__ == "__main__":
     if mode == "pre":
         score = engine.pre_runtime_scan()
         engine.save_pre_score(score)
+        print(f"pre-scan score={score} profile={engine.profile}")
+        for e in engine.explain_log:
+            print(" ", e)
     elif mode == "post":
         engine.compute_and_route_jri()
