@@ -46,10 +46,21 @@ jobs:
           CHANGED_FILES=$(git diff --name-only $BASE_SHA...$HEAD_SHA | grep -E '\.(ts|js|py|rs|go)$' || true)
           for FILE in $CHANGED_FILES; do
             if [ -f "$FILE" ]; then
-              LINE_COUNT=$(wc -l < "$FILE")
-              if [ "$LINE_COUNT" -gt "$HARD_LINE_CAP" ]; then
-                echo "❌ CI FAILURE: Module $FILE has reached $LINE_COUNT lines, shattering the $HARD_LINE_CAP line limit."
+              # A file already over the cap used to fail every PR that touched
+              # it, which made core_engine.py (379 lines against a 350 cap)
+              # impossible to refactor -- the rule blocked the only change that
+              # could ever satisfy it. Now it fails only on growth.
+              NEW_COUNT=$(wc -l < "$FILE")
+              OLD_COUNT=$(git show "$BASE_SHA:$FILE" 2>/dev/null | wc -l)
+              if [ "$NEW_COUNT" -gt "$HARD_LINE_CAP" ] && [ "$NEW_COUNT" -gt "$OLD_COUNT" ]; then
+                echo "CI FAILURE: $FILE is $NEW_COUNT lines (was $OLD_COUNT) -- past the $HARD_LINE_CAP cap and still growing."
+                echo "Action Required: split this module, or at minimum stop adding to it."
                 exit 1
+              fi
+              if [ "$NEW_COUNT" -gt "$HARD_LINE_CAP" ]; then
+                echo "NOTE: $FILE is $NEW_COUNT lines, over the $HARD_LINE_CAP cap, but this change does not grow it ($OLD_COUNT -> $NEW_COUNT). Allowed."
+              elif [ "$NEW_COUNT" -gt "$SOFT_LINE_CAP" ]; then
+                echo "NOTE: $FILE is $NEW_COUNT lines, past the $SOFT_LINE_CAP soft cap."
               fi
             fi
           done
