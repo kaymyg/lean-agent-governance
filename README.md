@@ -1,14 +1,8 @@
----
-license: mit
-tags:
-  - agent-security
-  - ai-governance
-  - sandboxing
-  - devsecops
-pretty_name: Adaptive Runtime Security Platform for Autonomous Agents (v8.0)
----
-
 # Adaptive Runtime Security Platform for Autonomous Agents (v8.0)
+
+[![CI](https://github.com/kaymyg/lean-agent-governance/actions/workflows/ci.yml/badge.svg)](https://github.com/kaymyg/lean-agent-governance/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-5%20passing-brightgreen)](tests/)
 
 A production-ready, drop-in governance layer for AI coding agents (Claude Code, Cursor, Aider).
 
@@ -45,6 +39,11 @@ Be precise about what this does and doesn't do:
 | `scripts/secure-agent-orchestrator.sh` | Phase-driven execution wrapper — RO repo mount / RW tmpfs overlay / patch export / timeout enforcement |
 | `.github/workflows/agent-governance.yml` | Remote CI pipeline arbiter |
 
+> `scripts/run-agent.sh` also exists in this repo but is **deprecated** — it
+> predates the isolation model above (RW `.git` mount, no risk-scoring gate,
+> no size/timeout limits) and is kept only for migration history. See the
+> warning at the top of that file. Use `secure-agent-orchestrator.sh`.
+
 ## Isolation Model
 
 ```
@@ -68,6 +67,15 @@ chmod +x scripts/secure-agent-orchestrator.sh
 ./scripts/secure-agent-orchestrator.sh aider "your prompt here"
 ```
 
+`core_engine.py` has zero third-party runtime dependencies — it's Python
+standard library only (`sqlite3`, `subprocess`, `re`, `hashlib`, etc.).
+Running the test suite needs `pytest` (see `requirements-dev.txt`):
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
 ## System Tunables (`config/security_profiles.json`)
 
 | Setting | Default | Purpose |
@@ -89,5 +97,39 @@ chmod +x scripts/secure-agent-orchestrator.sh
 ```bash
 ALLOW_CORE_CHANGES=true git commit -m "Architect manual override: update core types"
 ```
+
+---
+
+## Known limitations worth fixing
+
+Being transparent about the current gaps, since this is exactly the kind of
+thing a security-governance project should surface rather than bury:
+
+- `core_engine.py` is 379 lines against the project's own 350-line hard cap
+  (see `.github/workflows/agent-governance.yml`) — the codebase currently
+  fails its own governance rule. It's grandfathered in (CI only fails on
+  *growth* past the cap, not pre-existing size), but splitting it into
+  smaller modules is a good, concrete first contribution.
+- Test coverage is currently limited to the pre-runtime prompt scanner
+  (`tests/test_core_engine.py`). The `post` mode — JRI fusion, the
+  quarantine/block-and-isolate git branching logic, historical velocity
+  decay — has no automated test coverage yet.
+
+## Contributing
+
+Bug reports, new prompt-injection test cases, and PRs are welcome — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for setup and what CI checks.
+
+## Security
+
+Found a way to get a malicious payload past the pre-runtime scanner, or
+otherwise defeat the risk scoring? Please see [`SECURITY.md`](SECURITY.md)
+for how to report it responsibly rather than opening a public issue.
+
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md).
+
+---
 
 Published by [@Sahek](https://huggingface.co/Sahek).
