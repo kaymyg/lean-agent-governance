@@ -9,11 +9,17 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def scan(prompt: str, session: str):
+import tempfile
+
+_STATE_DIR = tempfile.mkdtemp(prefix="lag-test-state-")
+
+
+def scan(prompt: str, session: str, state_dir: str = _STATE_DIR):
     """Run the pre-runtime scanner; returns (exit_code, stdout)."""
+    env = dict(os.environ, AGENT_GOVERNANCE_STATE_DIR=state_dir)
     r = subprocess.run(
         [sys.executable, "core_engine.py", "pre", session, prompt],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT, capture_output=True, text=True, env=env,
     )
     return r.returncode, r.stdout
 
@@ -54,3 +60,31 @@ def test_base64_injection_is_detected():
 def test_base64_does_not_false_positive_on_plain_words():
     _, out = scan("Please update the AuthenticationConfiguration module now", "t_fp")
     assert score_of(out) == 0
+
+
+def test_state_db_is_private_and_not_in_shared_tmp(tmp_path):
+    """REGRESSION: the state DB lived at the fixed path /tmp/agent_intel_state.db,
+    where any local user could pre-create or replace it."""
+    state = tmp_path / "state"
+    scan("please refactor the date parsing module", "t_state", str(state))
+    db = state / "agent_intel_state.db"
+    assert db.exists()
+    assert (state.stat().st_mode & 0o077) == 0, "state dir must not be group/world accessible"
+    src = open(os.path.join(ROOT, "core_engine.py"), encoding="utf-8").read()
+    assert 'db_path = "/tmp' not in src
+
+
+def test_symlinked_state_db_is_refused(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    (state / "agent_intel_state.db").symlink_to(tmp_path / "attacker.db")
+    code, _ = scan("please refactor the date parsing module", "t_link", str(state))
+    assert code != 0
+    assert not (tmp_path / "attacker.db").exists()
+
+
+def test_source_has_no_raw_bidi_or_zero_width_characters():
+    """Trojan Source hygiene: such characters must be written as escapes."""
+    src = open(os.path.join(ROOT, "core_engine.py"), encoding="utf-8").read()
+    bad = [c for c in "​‌‍⁠﻿‪‫‬‭‮⁦⁧⁨⁩" if c in src]
+    assert not bad
