@@ -10,39 +10,10 @@ import subprocess
 import uuid
 import hashlib
 from datetime import datetime, timedelta
+from state_path import state_db_path
 
-# Written as escapes, not raw characters: raw bidi/zero-width characters in
-# source are themselves a "Trojan Source" risk (CVE-2021-42574) and get
-# flagged by scanners and code review tools.
-_ZERO_WIDTH_CHARS = "".join([
-    "\u200b", "\u200c", "\u200d", "\u2060", "\ufeff",   # zero-width
-    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",   # bidi embeddings/overrides
-])
-
-
-def _state_db_path():
-    """Per-user location for the engine's state database.
-
-    It used to be the fixed path /tmp/agent_intel_state.db. /tmp is shared by
-    every user on the machine, so another account could pre-create or replace
-    that file (or point a symlink at it) and erase or forge the session history
-    that quarantine decisions rely on. The default now lives under the user's
-    own state directory with 0700 permissions. AGENT_GOVERNANCE_STATE_DIR
-    overrides it (tests and CI use this).
-    """
-    base = os.environ.get("AGENT_GOVERNANCE_STATE_DIR")
-    if not base:
-        xdg = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
-        base = os.path.join(xdg, "lean-agent-governance")
-    os.makedirs(base, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(base, 0o700)
-    except OSError:
-        pass
-    path = os.path.join(base, "agent_intel_state.db")
-    if os.path.islink(path):
-        raise RuntimeError(f"refusing to use state database {path}: it is a symlink")
-    return path
+# Zero-width and bidi characters, written as escapes (raw ones are a Trojan Source risk, CVE-2021-42574)
+_ZERO_WIDTH_CHARS = "\u200b\u200c\u200d\u2060\ufeff\u202a\u202b\u202c\u202d\u202e"
 _ZERO_WIDTH_RE = re.compile("[" + _ZERO_WIDTH_CHARS + "]")
 
 # Process exit statuses must be 0-255; anything larger is taken mod 256.
@@ -58,7 +29,7 @@ class AgentSecurityEngine:
         self.workspace_dir = workspace_dir
         self.session_id = session_id
         self.raw_prompt = raw_prompt
-        self.db_path = _state_db_path()
+        self.db_path = state_db_path()
         self.explain_log = []
 
         self.repo_id = self._derive_repo_id()
