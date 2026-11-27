@@ -10,11 +10,10 @@ import subprocess
 import uuid
 import hashlib
 from datetime import datetime, timedelta
+from state_path import state_db_path
 
-_ZERO_WIDTH_CHARS = "".join([
-    "​", "‌", "‍", "⁠", "﻿",
-    "‪", "‫", "‬", "‭", "‮",
-])
+# Zero-width and bidi characters, written as escapes (raw ones are a Trojan Source risk, CVE-2021-42574)
+_ZERO_WIDTH_CHARS = "\u200b\u200c\u200d\u2060\ufeff\u202a\u202b\u202c\u202d\u202e"
 _ZERO_WIDTH_RE = re.compile("[" + _ZERO_WIDTH_CHARS + "]")
 
 # Process exit statuses must be 0-255; anything larger is taken mod 256.
@@ -30,7 +29,7 @@ class AgentSecurityEngine:
         self.workspace_dir = workspace_dir
         self.session_id = session_id
         self.raw_prompt = raw_prompt
-        self.db_path = "/tmp/agent_intel_state.db"
+        self.db_path = state_db_path()
         self.explain_log = []
 
         self.repo_id = self._derive_repo_id()
