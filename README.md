@@ -3,6 +3,7 @@
 [![CI](https://github.com/kaymyg/lean-agent-governance/actions/workflows/ci.yml/badge.svg)](https://github.com/kaymyg/lean-agent-governance/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-5%20passing-brightgreen)](tests/)
+[![CodeQL](https://github.com/kaymyg/lean-agent-governance/actions/workflows/codeql.yml/badge.svg)](https://github.com/kaymyg/lean-agent-governance/actions/workflows/codeql.yml)
 
 A production-ready, drop-in governance layer for AI coding agents (Claude Code, Cursor, Aider).
 
